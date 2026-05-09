@@ -8,6 +8,7 @@
 
 - **メニューバー常駐**：`🔋 Mobile` / `💤 Normal` で現在のモードを一目で確認
 - **ワンクリック切替**：`Mobile Mode に切替` / `Normal Mode に切替` をメニューから選ぶだけ
+- **Chrome の一時停止/再開**：暴走タブの放熱・電力対策に SIGSTOP/SIGCONT で凍結（v1.2.0〜）
 - **sudo パスワードなし**：`/etc/sudoers.d/pmset` 経由で `pmset` のみパスワード省略
 - **Dock を汚さない**：`LSUIElement=true` で Dock アイコン非表示
 
@@ -60,10 +61,25 @@ cd mac-power-mode
 Mobile Mode に切替  ⌘M
 Normal Mode に切替  ⌘N
 ─────────────────
+Chrome を一時停止           ← Chrome 起動中のみ表示
+Chrome を再開               ← Chrome 一時停止中のみ表示
+─────────────────
 終了                 ⌘Q
 ```
 
 切替直後、macOS の通知センターに結果が表示されます（要：通知許可）。
+
+### Chrome の一時停止/再開について
+
+Mobile Mode で蓋を閉じている時に Chrome のタブが暴走すると CPU/熱が一気に上がります。
+そのような状況で `Chrome を一時停止` を選ぶと、Chrome の全プロセス（メイン + Helper 群）に
+`SIGSTOP` が送られて完全に凍結し、CPU 消費が 0 になります。`Chrome を再開` で `SIGCONT` を
+送って復帰します。
+
+**注意点**:
+- 凍結中は通知・タブ更新・ダウンロード・タイマーがすべて停止
+- TCP keepalive を超えるとネットワーク接続が切れることがある
+- 再開時に Slack/Gmail 等の Web アプリで再ログインが必要になる場合がある
 
 ## アンインストール
 

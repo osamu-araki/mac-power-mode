@@ -1,10 +1,20 @@
 // Power Mode — メニューバー常駐の電源モード切替アプリ
-// Version: 1.1.0 | Updated: 2026-05-09
+// Version: 1.2.0 | Updated: 2026-05-09
+// [2026-05-09] Chrome を SIGSTOP/SIGCONT で一時停止/再開するメニュー項目を追加
 
 import Cocoa
 
+enum ChromeState {
+    case notRunning
+    case running
+    case stopped
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
+    var chromePauseItem: NSMenuItem!
+    var chromeResumeItem: NSMenuItem!
+    var chromeSeparatorItem: NSMenuItem!
 
     /// スクリプトの探索順:
     /// 1. 環境変数 POWER_MODE_SCRIPTS_DIR
@@ -42,6 +52,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         normalItem.target = self
         menu.addItem(normalItem)
 
+        chromeSeparatorItem = NSMenuItem.separator()
+        menu.addItem(chromeSeparatorItem)
+
+        chromePauseItem = NSMenuItem(title: "Chrome を一時停止", action: #selector(pauseChrome), keyEquivalent: "")
+        chromePauseItem.target = self
+        menu.addItem(chromePauseItem)
+
+        chromeResumeItem = NSMenuItem(title: "Chrome を再開", action: #selector(resumeChrome), keyEquivalent: "")
+        chromeResumeItem.target = self
+        menu.addItem(chromeResumeItem)
+
         menu.addItem(NSMenuItem.separator())
 
         let quitItem = NSMenuItem(title: "終了", action: #selector(quitApp), keyEquivalent: "q")
@@ -50,6 +71,64 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         statusItem.menu = menu
         updateStatus()
+    }
+
+    @objc func pauseChrome() {
+        // Chrome の全プロセス（メイン + Helper群）に SIGSTOP を送信
+        runProcess("/usr/bin/pkill", ["-STOP", "-f", "Google Chrome"])
+        notify(title: "🟡 Chrome 一時停止", body: "再開するまで CPU/GPU を消費しません")
+        updateStatus()
+    }
+
+    @objc func resumeChrome() {
+        runProcess("/usr/bin/pkill", ["-CONT", "-f", "Google Chrome"])
+        notify(title: "🟢 Chrome 再開", body: "一部のWebアプリで再ログインが必要な場合があります")
+        updateStatus()
+    }
+
+    func runProcess(_ executable: String, _ args: [String]) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: executable)
+        task.arguments = args
+        do {
+            try task.run()
+            task.waitUntilExit()
+        } catch {
+            NSLog("runProcess error: \(error)")
+        }
+    }
+
+    func notify(title: String, body: String) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = ["-e", "display notification \"\(body)\" with title \"\(title)\""]
+        try? task.run()
+    }
+
+    func chromeState() -> ChromeState {
+        // ps の state 列の先頭文字で判定（T = stopped）
+        let output = runOutput("/bin/ps", ["-axo", "state=,command="])
+        var found = false
+        var anyStopped = false
+        var anyRunning = false
+        for line in output.split(separator: "\n") {
+            let trimmed = String(line).trimmingCharacters(in: .whitespaces)
+            guard trimmed.contains("Google Chrome") else { continue }
+            // ヘルパー以外の "Google Chrome" を確実に拾う（自分自身は除外）
+            guard !trimmed.contains("PowerMode") else { continue }
+            found = true
+            if let firstChar = trimmed.first {
+                if firstChar == "T" {
+                    anyStopped = true
+                } else {
+                    anyRunning = true
+                }
+            }
+        }
+        if !found { return .notRunning }
+        // 全プロセスがT状態のときのみ "stopped" 扱い
+        if anyStopped && !anyRunning { return .stopped }
+        return .running
     }
 
     @objc func switchToMobile() {
@@ -144,6 +223,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.title = label
         if let menu = statusItem.menu, let item = menu.item(withTag: 1) {
             item.title = "現在: \(mode)"
+        }
+
+        // Chrome 状態に応じてメニュー項目を出し分け
+        let cs = chromeState()
+        switch cs {
+        case .notRunning:
+            chromePauseItem.isHidden = true
+            chromeResumeItem.isHidden = true
+            chromeSeparatorItem.isHidden = true
+        case .running:
+            chromePauseItem.isHidden = false
+            chromeResumeItem.isHidden = true
+            chromeSeparatorItem.isHidden = false
+        case .stopped:
+            chromePauseItem.isHidden = true
+            chromeResumeItem.isHidden = false
+            chromeSeparatorItem.isHidden = false
         }
     }
 
