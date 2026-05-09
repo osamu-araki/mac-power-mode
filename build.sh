@@ -1,12 +1,14 @@
 #!/bin/bash
 # Power Mode.app をビルドする
 # 使い方: ./build.sh [出力先ディレクトリ]
-# デフォルトの出力先: ./build/
+# デフォルトの出力先: ./build.noindex/
+# .noindex サフィックスにより Spotlight が成果物をインデックスしないため、
+# ~/Applications/ にインストールしたものと重複表示されない。
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUT_DIR="${1:-$REPO_ROOT/build}"
+OUT_DIR="${1:-$REPO_ROOT/build.noindex}"
 APP_NAME="Power Mode"
 APP="$OUT_DIR/${APP_NAME}.app"
 

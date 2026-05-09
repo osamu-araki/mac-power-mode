@@ -6,6 +6,7 @@ Icon
 
 # Build artifacts
 build/
+build.noindex/
 dist/
 *.app/
 PowerMode/PowerMode

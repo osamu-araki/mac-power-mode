@@ -10,6 +10,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_NAME="Power Mode"
 APPLICATIONS_DIR="$HOME/Applications"
 SUDOERS_FILE="/etc/sudoers.d/pmset"
+BUILD_DIR="$REPO_ROOT/build.noindex"
 
 echo "================================================"
 echo "  Power Mode インストーラ"
@@ -18,7 +19,7 @@ echo ""
 
 # Step 1: アプリをビルド
 echo "[1/3] アプリをビルドします"
-"$REPO_ROOT/build.sh" "$REPO_ROOT/build"
+"$REPO_ROOT/build.sh" "$BUILD_DIR"
 echo ""
 
 # Step 2: ~/Applications/ にコピー
@@ -33,7 +34,7 @@ if [ -e "$DEST" ]; then
 fi
 
 rm -rf "$DEST"
-cp -R "$REPO_ROOT/build/${APP_NAME}.app" "$DEST"
+cp -R "$BUILD_DIR/${APP_NAME}.app" "$DEST"
 echo "   配置完了: $DEST"
 echo ""
 
