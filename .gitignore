@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+
+# Build artifacts
+build/
+dist/
+*.app/
+PowerMode/PowerMode
+*.o
+*.dSYM
+*.swiftmodule
+*.swiftdoc
+
+# IDE
+.vscode/
+.idea/
+*.xcodeproj/
+
+# Editor
+*~
+*.swp
+.#*
+
+# Logs
+*.log
