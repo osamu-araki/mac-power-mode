@@ -33,7 +33,7 @@ xcode-select --install  # 未インストールの場合
 ## インストール
 
 ```bash
-git clone https://github.com/<your-name>/mac-power-mode.git
+git clone https://github.com/osamu-araki/mac-power-mode.git
 cd mac-power-mode
 ./install.sh
 ```
