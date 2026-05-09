@@ -1,35 +1,22 @@
 // Power Mode — メニューバー常駐の電源モード切替アプリ
-// Version: 1.3.0 | Updated: 2026-05-10
-// [2026-05-09] Chrome を SIGSTOP/SIGCONT で一時停止/再開するメニュー項目を追加
+// Version: 1.4.0 | Updated: 2026-05-10
+// [2026-05-09] Chrome の SIGSTOP/SIGCONT 制御
 // [2026-05-09] 自動終了（AutomaticTermination）を無効化
 // [2026-05-10] runOutput のパイプバッファ・デッドロックを修正
-// [2026-05-10] 蓋連動オートメーション追加（Mobile Mode + 蓋閉で Chrome 自動停止/再開）
+// [2026-05-10] 蓋連動オートメーション追加
+// [2026-05-10] UI を簡素化: Chrome の手動操作・opt-in トグルを撤去し、常時自動連動に統一
 
 import Cocoa
 import IOKit
 import IOKit.pwr_mgt
 
-enum ChromeState {
-    case notRunning
-    case running
-    case stopped
-}
-
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
-    var chromePauseItem: NSMenuItem!
-    var chromeResumeItem: NSMenuItem!
-    var chromeSeparatorItem: NSMenuItem!
-    var autoPauseToggleItem: NSMenuItem!
 
     // 蓋連動の状態管理
     var notifyPort: IONotificationPortRef?
     var lidNotifierObject: io_object_t = 0
     var lastKnownLidClosed: Bool = false
-    var autoPauseEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: "autoPauseChromeOnLidClose") }
-        set { UserDefaults.standard.set(newValue, forKey: "autoPauseChromeOnLidClose") }
-    }
 
     /// スクリプトの探索順:
     /// 1. 環境変数 POWER_MODE_SCRIPTS_DIR
@@ -73,25 +60,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         normalItem.target = self
         menu.addItem(normalItem)
 
-        chromeSeparatorItem = NSMenuItem.separator()
-        menu.addItem(chromeSeparatorItem)
-
-        chromePauseItem = NSMenuItem(title: "Chrome を一時停止", action: #selector(pauseChrome), keyEquivalent: "")
-        chromePauseItem.target = self
-        menu.addItem(chromePauseItem)
-
-        chromeResumeItem = NSMenuItem(title: "Chrome を再開", action: #selector(resumeChrome), keyEquivalent: "")
-        chromeResumeItem.target = self
-        menu.addItem(chromeResumeItem)
-
-        autoPauseToggleItem = NSMenuItem(
-            title: "蓋連動: Mobile Mode + 蓋閉で Chrome 自動停止",
-            action: #selector(toggleAutoPause),
-            keyEquivalent: ""
-        )
-        autoPauseToggleItem.target = self
-        menu.addItem(autoPauseToggleItem)
-
         menu.addItem(NSMenuItem.separator())
 
         let quitItem = NSMenuItem(title: "終了", action: #selector(quitApp), keyEquivalent: "q")
@@ -111,40 +79,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func switchToMobile() {
         runScript("\(scriptsBase)/mobile-mode.sh")
-        applyAutoPauseLogic()  // モード切替時にも自動停止ロジックを適用
+        applyAutoPauseLogic()  // モード切替時に Chrome 状態を整合
         updateStatus()
     }
 
     @objc func switchToNormal() {
         runScript("\(scriptsBase)/normal-mode.sh")
-        applyAutoPauseLogic()  // Normal に戻ったら必要に応じて Chrome 再開
+        applyAutoPauseLogic()  // Normal に戻ったら Chrome を再開
         updateStatus()
-    }
-
-    @objc func pauseChrome() {
-        runProcess("/usr/bin/pkill", ["-STOP", "-f", "Google Chrome"])
-        notify(title: "🟡 Chrome 一時停止", body: "再開するまで CPU/GPU を消費しません")
-        updateStatus()
-    }
-
-    @objc func resumeChrome() {
-        runProcess("/usr/bin/pkill", ["-CONT", "-f", "Google Chrome"])
-        notify(title: "🟢 Chrome 再開", body: "一部のWebアプリで再ログインが必要な場合があります")
-        updateStatus()
-    }
-
-    @objc func toggleAutoPause() {
-        autoPauseEnabled.toggle()
-        // ON にした瞬間に現在の状態に合わせて Chrome を制御
-        applyAutoPauseLogic()
-        updateStatus()
-        let label = autoPauseEnabled ? "ON" : "OFF"
-        notify(title: "蓋連動オートメーション: \(label)", body: autoPauseEnabled
-            ? "Mobile Mode で蓋を閉じると Chrome を自動停止します"
-            : "蓋連動を無効にしました")
     }
 
     @objc func quitApp() {
+        // 終了時に Chrome が停止状態だったら再開してから終了（取り残し防止）
+        runProcess("/usr/bin/pkill", ["-CONT", "-f", "Google Chrome"])
         NSApp.terminate(nil)
     }
 
@@ -169,7 +116,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let context = Unmanaged.passUnretained(self).toOpaque()
 
-        // kIOGeneralInterest で IOPMrootDomain 配下の状態変化通知を購読
         let result = IOServiceAddInterestNotification(
             notifyPort,
             service,
@@ -188,9 +134,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if result != KERN_SUCCESS {
             NSLog("setupClamshellNotifications: IOServiceAddInterestNotification failed: \(result)")
         }
-
-        // service への参照は notification 内部で保持されるので、ここでは release しない
-        // （IOServiceAddInterestNotification は内部で retain する仕様）
         IOObjectRelease(service)
     }
 
@@ -233,7 +176,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Mobile Mode + 蓋閉 → Chrome 停止 / それ以外 → 再開
     /// SIGSTOP/SIGCONT は冪等（既に同じ状態なら no-op）なので毎回呼んで OK
     func applyAutoPauseLogic() {
-        guard autoPauseEnabled else { return }
         let mode = currentMode().mode
         let shouldPause = (mode == "Mobile" && lastKnownLidClosed)
         if shouldPause {
@@ -272,13 +214,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func runOutput(_ executable: String, _ args: [String]) -> String {
         // 注意: パイプバッファ（macOSで通常64KB）を超える出力がある場合、
         // waitUntilExit() を先に呼ぶと子プロセスの書き込みが詰まり双方が待ち続けてデッドロックする。
-        // ps -axo state=,command= は容易に64KBを超えるため、readDataToEndOfFile() を先に呼ぶ。
+        // readDataToEndOfFile() を先に呼ぶ。
         let task = Process()
         task.executableURL = URL(fileURLWithPath: executable)
         task.arguments = args
         let pipe = Pipe()
         task.standardOutput = pipe
-        task.standardError = Pipe()  // stderr は捨てる
+        task.standardError = Pipe()
         do {
             try task.run()
         } catch {
@@ -289,40 +231,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return String(data: data, encoding: .utf8) ?? ""
     }
 
-    func notify(title: String, body: String) {
-        // ダブルクオート・バックスラッシュをエスケープ
-        let escapedTitle = title.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-        let escapedBody = body.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        task.arguments = ["-e", "display notification \"\(escapedBody)\" with title \"\(escapedTitle)\""]
-        try? task.run()
-    }
-
-    // MARK: - 状態判定
-
-    func chromeState() -> ChromeState {
-        let output = runOutput("/bin/ps", ["-axo", "state=,command="])
-        var found = false
-        var anyStopped = false
-        var anyRunning = false
-        for line in output.split(separator: "\n") {
-            let trimmed = String(line).trimmingCharacters(in: .whitespaces)
-            guard trimmed.contains("Google Chrome") else { continue }
-            guard !trimmed.contains("PowerMode") else { continue }
-            found = true
-            if let firstChar = trimmed.first {
-                if firstChar == "T" {
-                    anyStopped = true
-                } else {
-                    anyRunning = true
-                }
-            }
-        }
-        if !found { return .notRunning }
-        if anyStopped && !anyRunning { return .stopped }
-        return .running
-    }
+    // MARK: - モード判定
 
     func currentMode() -> (label: String, mode: String) {
         let g = runOutput("/usr/bin/pmset", ["-g"])
@@ -376,26 +285,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let lidLabel = lastKnownLidClosed ? "蓋: 閉" : "蓋: 開"
             item.title = "現在: \(mode) | \(lidLabel)"
         }
-
-        // Chrome 状態に応じてメニュー項目を出し分け
-        let cs = chromeState()
-        switch cs {
-        case .notRunning:
-            chromePauseItem.isHidden = true
-            chromeResumeItem.isHidden = true
-            chromeSeparatorItem.isHidden = true
-        case .running:
-            chromePauseItem.isHidden = false
-            chromeResumeItem.isHidden = true
-            chromeSeparatorItem.isHidden = false
-        case .stopped:
-            chromePauseItem.isHidden = true
-            chromeResumeItem.isHidden = false
-            chromeSeparatorItem.isHidden = false
-        }
-
-        // 蓋連動トグル項目のチェックマーク
-        autoPauseToggleItem.state = autoPauseEnabled ? .on : .off
     }
 
     // メニューを開いた瞬間に最新状態を反映

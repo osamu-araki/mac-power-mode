@@ -8,8 +8,7 @@
 
 - **メニューバー常駐**：`🔋 Mobile` / `💤 Normal` で現在のモードを一目で確認
 - **ワンクリック切替**：`Mobile Mode に切替` / `Normal Mode に切替` をメニューから選ぶだけ
-- **Chrome の一時停止/再開**：暴走タブの放熱・電力対策に SIGSTOP/SIGCONT で凍結（v1.2.0〜）
-- **蓋連動オートメーション**：Mobile Mode で蓋を閉じた瞬間に Chrome を自動停止、開けたら自動再開（v1.3.0〜）
+- **Chrome 自動停止/再開**：Mobile Mode で蓋を閉じると Chrome を SIGSTOP で凍結、開けたら SIGCONT で再開
 - **sudo パスワードなし**：`/etc/sudoers.d/pmset` 経由で `pmset` のみパスワード省略
 - **Dock を汚さない**：`LSUIElement=true` で Dock アイコン非表示
 
@@ -62,43 +61,32 @@ cd mac-power-mode
 Mobile Mode に切替  ⌘M
 Normal Mode に切替  ⌘N
 ─────────────────
-Chrome を一時停止           ← Chrome 起動中のみ表示
-Chrome を再開               ← Chrome 一時停止中のみ表示
-☑ 蓋連動: Mobile Mode + 蓋閉で Chrome 自動停止
-─────────────────
 終了                 ⌘Q
 ```
 
 切替直後、macOS の通知センターに結果が表示されます（要：通知許可）。
 
-### Chrome の一時停止/再開について
+### Chrome の自動停止/再開
 
-Mobile Mode で蓋を閉じている時に Chrome のタブが暴走すると CPU/熱が一気に上がります。
-そのような状況で `Chrome を一時停止` を選ぶと、Chrome の全プロセス（メイン + Helper 群）に
-`SIGSTOP` が送られて完全に凍結し、CPU 消費が 0 になります。`Chrome を再開` で `SIGCONT` を
-送って復帰します。
+Mobile Mode は「鞄に入れて蓋を閉じて移動するためのモード」と定義されているため、
+Chrome は蓋の開閉に追随して自動的に制御されます。手動操作は不要です。
 
-**注意点**:
-- 凍結中は通知・タブ更新・ダウンロード・タイマーがすべて停止
-- TCP keepalive を超えるとネットワーク接続が切れることがある
-- 再開時に Slack/Gmail 等の Web アプリで再ログインが必要になる場合がある
-
-### 蓋連動オートメーション（v1.3.0〜）
-
-メニューの `蓋連動: Mobile Mode + 蓋閉で Chrome 自動停止` をクリックして ON にすると、
-以下のタイミングで Chrome が自動操作されます:
-
-| 状況 | アクション |
+| 状況 | Chrome の挙動 |
 |---|---|
-| Mobile Mode 中に蓋を閉じた瞬間 | Chrome を SIGSTOP で凍結 |
-| 蓋を開けた瞬間 | Chrome を SIGCONT で再開 |
-| Mobile → Normal に切替 | Chrome を SIGCONT で再開 |
-| Normal Mode（モード問わず蓋閉じれば clamshell sleep） | アプリ介入なし（OSが寝る） |
+| Mobile Mode 中に蓋を閉じた瞬間 | `SIGSTOP` で凍結（CPU/GPU 消費 0） |
+| 蓋を開けた瞬間 | `SIGCONT` で再開 |
+| Mobile → Normal に切替 | `SIGCONT` で再開（取り残し防止） |
+| Normal Mode で蓋閉じ | OS の clamshell sleep に任せる（介入なし） |
+| アプリを終了する時 | 万一停止状態だったら `SIGCONT` で再開してから終了 |
 
 蓋の開閉は IOKit の `AppleClamshellState` プロパティ変化を `IOServiceAddInterestNotification`
 で購読しているため、ポーリングなしのリアルタイム検出です。
 
-設定はアプリ間で永続化されます（`UserDefaults` に保存）。デフォルトは OFF。
+**注意点**:
+- 凍結中は Chrome の通知・タブ更新・ダウンロード・タイマーがすべて停止
+- TCP keepalive を超えるとネットワーク接続が切れることがある
+- 再開時に Slack/Gmail 等の Web アプリで再ログインが必要になる場合がある
+- Chrome を凍結したくない時は **Normal Mode** のまま運用（蓋を開けたままにする）
 
 ## アンインストール
 
