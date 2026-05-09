@@ -9,9 +9,9 @@
     <key>CFBundleIdentifier</key>
     <string>jp.salesnow.osamu.powermode</string>
     <key>CFBundleVersion</key>
-    <string>1.2.0</string>
+    <string>1.2.1</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.2.0</string>
+    <string>1.2.1</string>
     <key>CFBundleExecutable</key>
     <string>PowerMode</string>
     <key>CFBundlePackageType</key>
@@ -24,5 +24,9 @@
     <string>11.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+    <key>NSSupportsSuddenTermination</key>
+    <false/>
 </dict>
 </plist>

@@ -1,6 +1,7 @@
 // Power Mode — メニューバー常駐の電源モード切替アプリ
-// Version: 1.2.0 | Updated: 2026-05-09
+// Version: 1.2.1 | Updated: 2026-05-09
 // [2026-05-09] Chrome を SIGSTOP/SIGCONT で一時停止/再開するメニュー項目を追加
+// [2026-05-09] 自動終了（AutomaticTermination）を無効化してメニュー無反応問題を修正
 
 import Cocoa
 
@@ -32,6 +33,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // メニューバー常駐アプリは macOS の Automatic Termination 対象になりやすく、
+        // アイドルと判定されると裏で kill → アイコンだけが Control Center にゾンビ化し、
+        // クリックが効かなくなる。これを明示的に無効化する。
+        ProcessInfo.processInfo.disableAutomaticTermination("Power Mode は常駐アプリのため自動終了させない")
+        ProcessInfo.processInfo.disableSuddenTermination()
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         let menu = NSMenu()
