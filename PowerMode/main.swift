@@ -1,7 +1,8 @@
 // Power Mode — メニューバー常駐の電源モード切替アプリ
-// Version: 1.2.1 | Updated: 2026-05-09
+// Version: 1.2.2 | Updated: 2026-05-10
 // [2026-05-09] Chrome を SIGSTOP/SIGCONT で一時停止/再開するメニュー項目を追加
-// [2026-05-09] 自動終了（AutomaticTermination）を無効化してメニュー無反応問題を修正
+// [2026-05-09] 自動終了（AutomaticTermination）を無効化
+// [2026-05-10] runOutput のパイプバッファ・デッドロックを修正（メニュー無反応の真因）
 
 import Cocoa
 
@@ -165,18 +166,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func runOutput(_ executable: String, _ args: [String]) -> String {
+        // 注意: パイプバッファ（macOSで通常64KB）を超える出力がある場合、
+        // waitUntilExit() を先に呼ぶと子プロセスの書き込みが詰まり双方が待ち続けてデッドロックする。
+        // ps -axo state=,command= は容易に64KBを超えるため、readDataToEndOfFile() を先に呼ぶ。
         let task = Process()
         task.executableURL = URL(fileURLWithPath: executable)
         task.arguments = args
         let pipe = Pipe()
         task.standardOutput = pipe
+        task.standardError = Pipe()  // stderr は捨てる
         do {
             try task.run()
-            task.waitUntilExit()
         } catch {
             return ""
         }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
         return String(data: data, encoding: .utf8) ?? ""
     }
 
