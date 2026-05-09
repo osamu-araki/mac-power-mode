@@ -1,10 +1,13 @@
 // Power Mode — メニューバー常駐の電源モード切替アプリ
-// Version: 1.2.2 | Updated: 2026-05-10
+// Version: 1.3.0 | Updated: 2026-05-10
 // [2026-05-09] Chrome を SIGSTOP/SIGCONT で一時停止/再開するメニュー項目を追加
 // [2026-05-09] 自動終了（AutomaticTermination）を無効化
-// [2026-05-10] runOutput のパイプバッファ・デッドロックを修正（メニュー無反応の真因）
+// [2026-05-10] runOutput のパイプバッファ・デッドロックを修正
+// [2026-05-10] 蓋連動オートメーション追加（Mobile Mode + 蓋閉で Chrome 自動停止/再開）
 
 import Cocoa
+import IOKit
+import IOKit.pwr_mgt
 
 enum ChromeState {
     case notRunning
@@ -17,6 +20,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var chromePauseItem: NSMenuItem!
     var chromeResumeItem: NSMenuItem!
     var chromeSeparatorItem: NSMenuItem!
+    var autoPauseToggleItem: NSMenuItem!
+
+    // 蓋連動の状態管理
+    var notifyPort: IONotificationPortRef?
+    var lidNotifierObject: io_object_t = 0
+    var lastKnownLidClosed: Bool = false
+    var autoPauseEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "autoPauseChromeOnLidClose") }
+        set { UserDefaults.standard.set(newValue, forKey: "autoPauseChromeOnLidClose") }
+    }
 
     /// スクリプトの探索順:
     /// 1. 環境変数 POWER_MODE_SCRIPTS_DIR
@@ -71,6 +84,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         chromeResumeItem.target = self
         menu.addItem(chromeResumeItem)
 
+        autoPauseToggleItem = NSMenuItem(
+            title: "蓋連動: Mobile Mode + 蓋閉で Chrome 自動停止",
+            action: #selector(toggleAutoPause),
+            keyEquivalent: ""
+        )
+        autoPauseToggleItem.target = self
+        menu.addItem(autoPauseToggleItem)
+
         menu.addItem(NSMenuItem.separator())
 
         let quitItem = NSMenuItem(title: "終了", action: #selector(quitApp), keyEquivalent: "q")
@@ -78,11 +99,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(quitItem)
 
         statusItem.menu = menu
+
+        // 蓋イベント購読を開始
+        lastKnownLidClosed = readClamshellState()
+        setupClamshellNotifications()
+
+        updateStatus()
+    }
+
+    // MARK: - メニューアクション
+
+    @objc func switchToMobile() {
+        runScript("\(scriptsBase)/mobile-mode.sh")
+        applyAutoPauseLogic()  // モード切替時にも自動停止ロジックを適用
+        updateStatus()
+    }
+
+    @objc func switchToNormal() {
+        runScript("\(scriptsBase)/normal-mode.sh")
+        applyAutoPauseLogic()  // Normal に戻ったら必要に応じて Chrome 再開
         updateStatus()
     }
 
     @objc func pauseChrome() {
-        // Chrome の全プロセス（メイン + Helper群）に SIGSTOP を送信
         runProcess("/usr/bin/pkill", ["-STOP", "-f", "Google Chrome"])
         notify(title: "🟡 Chrome 一時停止", body: "再開するまで CPU/GPU を消費しません")
         updateStatus()
@@ -94,64 +133,117 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateStatus()
     }
 
-    func runProcess(_ executable: String, _ args: [String]) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: executable)
-        task.arguments = args
-        do {
-            try task.run()
-            task.waitUntilExit()
-        } catch {
-            NSLog("runProcess error: \(error)")
-        }
-    }
-
-    func notify(title: String, body: String) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        task.arguments = ["-e", "display notification \"\(body)\" with title \"\(title)\""]
-        try? task.run()
-    }
-
-    func chromeState() -> ChromeState {
-        // ps の state 列の先頭文字で判定（T = stopped）
-        let output = runOutput("/bin/ps", ["-axo", "state=,command="])
-        var found = false
-        var anyStopped = false
-        var anyRunning = false
-        for line in output.split(separator: "\n") {
-            let trimmed = String(line).trimmingCharacters(in: .whitespaces)
-            guard trimmed.contains("Google Chrome") else { continue }
-            // ヘルパー以外の "Google Chrome" を確実に拾う（自分自身は除外）
-            guard !trimmed.contains("PowerMode") else { continue }
-            found = true
-            if let firstChar = trimmed.first {
-                if firstChar == "T" {
-                    anyStopped = true
-                } else {
-                    anyRunning = true
-                }
-            }
-        }
-        if !found { return .notRunning }
-        // 全プロセスがT状態のときのみ "stopped" 扱い
-        if anyStopped && !anyRunning { return .stopped }
-        return .running
-    }
-
-    @objc func switchToMobile() {
-        runScript("\(scriptsBase)/mobile-mode.sh")
+    @objc func toggleAutoPause() {
+        autoPauseEnabled.toggle()
+        // ON にした瞬間に現在の状態に合わせて Chrome を制御
+        applyAutoPauseLogic()
         updateStatus()
-    }
-
-    @objc func switchToNormal() {
-        runScript("\(scriptsBase)/normal-mode.sh")
-        updateStatus()
+        let label = autoPauseEnabled ? "ON" : "OFF"
+        notify(title: "蓋連動オートメーション: \(label)", body: autoPauseEnabled
+            ? "Mobile Mode で蓋を閉じると Chrome を自動停止します"
+            : "蓋連動を無効にしました")
     }
 
     @objc func quitApp() {
         NSApp.terminate(nil)
     }
+
+    // MARK: - 蓋イベント検出
+
+    func setupClamshellNotifications() {
+        let service = IOServiceGetMatchingService(
+            kIOMainPortDefault,
+            IOServiceMatching("IOPMrootDomain")
+        )
+        guard service != 0 else {
+            NSLog("setupClamshellNotifications: IOPMrootDomain not found")
+            return
+        }
+
+        notifyPort = IONotificationPortCreate(kIOMainPortDefault)
+        guard let notifyPort = notifyPort else {
+            IOObjectRelease(service)
+            return
+        }
+        IONotificationPortSetDispatchQueue(notifyPort, DispatchQueue.main)
+
+        let context = Unmanaged.passUnretained(self).toOpaque()
+
+        // kIOGeneralInterest で IOPMrootDomain 配下の状態変化通知を購読
+        let result = IOServiceAddInterestNotification(
+            notifyPort,
+            service,
+            kIOGeneralInterest,
+            { (refcon, _, _, _) in
+                guard let refcon = refcon else { return }
+                let app = Unmanaged<AppDelegate>.fromOpaque(refcon).takeUnretainedValue()
+                DispatchQueue.main.async {
+                    app.checkClamshellChange()
+                }
+            },
+            context,
+            &lidNotifierObject
+        )
+
+        if result != KERN_SUCCESS {
+            NSLog("setupClamshellNotifications: IOServiceAddInterestNotification failed: \(result)")
+        }
+
+        // service への参照は notification 内部で保持されるので、ここでは release しない
+        // （IOServiceAddInterestNotification は内部で retain する仕様）
+        IOObjectRelease(service)
+    }
+
+    /// 現在の蓋状態を IOKit から読む（true = 閉、false = 開）
+    func readClamshellState() -> Bool {
+        let service = IOServiceGetMatchingService(
+            kIOMainPortDefault,
+            IOServiceMatching("IOPMrootDomain")
+        )
+        guard service != 0 else { return false }
+        defer { IOObjectRelease(service) }
+
+        guard let propRef = IORegistryEntryCreateCFProperty(
+            service,
+            "AppleClamshellState" as CFString,
+            kCFAllocatorDefault,
+            0
+        ) else {
+            return false
+        }
+        let value = propRef.takeRetainedValue()
+        if let isClosed = value as? Bool {
+            return isClosed
+        }
+        if let num = value as? NSNumber {
+            return num.boolValue
+        }
+        return false
+    }
+
+    func checkClamshellChange() {
+        let nowClosed = readClamshellState()
+        if nowClosed != lastKnownLidClosed {
+            lastKnownLidClosed = nowClosed
+            applyAutoPauseLogic()
+            updateStatus()
+        }
+    }
+
+    /// Mobile Mode + 蓋閉 → Chrome 停止 / それ以外 → 再開
+    /// SIGSTOP/SIGCONT は冪等（既に同じ状態なら no-op）なので毎回呼んで OK
+    func applyAutoPauseLogic() {
+        guard autoPauseEnabled else { return }
+        let mode = currentMode().mode
+        let shouldPause = (mode == "Mobile" && lastKnownLidClosed)
+        if shouldPause {
+            runProcess("/usr/bin/pkill", ["-STOP", "-f", "Google Chrome"])
+        } else {
+            runProcess("/usr/bin/pkill", ["-CONT", "-f", "Google Chrome"])
+        }
+    }
+
+    // MARK: - プロセス実行ユーティリティ
 
     func runScript(_ path: String) {
         let task = Process()
@@ -162,6 +254,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             task.waitUntilExit()
         } catch {
             NSLog("runScript error: \(error)")
+        }
+    }
+
+    func runProcess(_ executable: String, _ args: [String]) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: executable)
+        task.arguments = args
+        do {
+            try task.run()
+            task.waitUntilExit()
+        } catch {
+            NSLog("runProcess error: \(error)")
         }
     }
 
@@ -185,8 +289,42 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return String(data: data, encoding: .utf8) ?? ""
     }
 
+    func notify(title: String, body: String) {
+        // ダブルクオート・バックスラッシュをエスケープ
+        let escapedTitle = title.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let escapedBody = body.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = ["-e", "display notification \"\(escapedBody)\" with title \"\(escapedTitle)\""]
+        try? task.run()
+    }
+
+    // MARK: - 状態判定
+
+    func chromeState() -> ChromeState {
+        let output = runOutput("/bin/ps", ["-axo", "state=,command="])
+        var found = false
+        var anyStopped = false
+        var anyRunning = false
+        for line in output.split(separator: "\n") {
+            let trimmed = String(line).trimmingCharacters(in: .whitespaces)
+            guard trimmed.contains("Google Chrome") else { continue }
+            guard !trimmed.contains("PowerMode") else { continue }
+            found = true
+            if let firstChar = trimmed.first {
+                if firstChar == "T" {
+                    anyStopped = true
+                } else {
+                    anyRunning = true
+                }
+            }
+        }
+        if !found { return .notRunning }
+        if anyStopped && !anyRunning { return .stopped }
+        return .running
+    }
+
     func currentMode() -> (label: String, mode: String) {
-        // SleepDisabled はシステム全体設定。pmset -g の "SleepDisabled" 行から取得
         let g = runOutput("/usr/bin/pmset", ["-g"])
         var sleepDisabled = "0"
         for line in g.split(separator: "\n") {
@@ -199,7 +337,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
-        // バッテリー駆動時の sleep 値
         let custom = runOutput("/usr/bin/pmset", ["-g", "custom"])
         var inBattery = false
         var sleepVal = "?"
@@ -230,11 +367,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    // MARK: - UI 更新
+
     func updateStatus() {
         let (label, mode) = currentMode()
         statusItem.button?.title = label
         if let menu = statusItem.menu, let item = menu.item(withTag: 1) {
-            item.title = "現在: \(mode)"
+            let lidLabel = lastKnownLidClosed ? "蓋: 閉" : "蓋: 開"
+            item.title = "現在: \(mode) | \(lidLabel)"
         }
 
         // Chrome 状態に応じてメニュー項目を出し分け
@@ -253,16 +393,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             chromeResumeItem.isHidden = false
             chromeSeparatorItem.isHidden = false
         }
+
+        // 蓋連動トグル項目のチェックマーク
+        autoPauseToggleItem.state = autoPauseEnabled ? .on : .off
     }
 
     // メニューを開いた瞬間に最新状態を反映
     func menuWillOpen(_ menu: NSMenu) {
+        // 念のため蓋状態も再読込（通知を取りこぼした場合の保険）
+        lastKnownLidClosed = readClamshellState()
         updateStatus()
     }
 }
 
 let app = NSApplication.shared
-app.setActivationPolicy(.accessory)  // Dockに表示せずメニューバー常駐
+app.setActivationPolicy(.accessory)
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()

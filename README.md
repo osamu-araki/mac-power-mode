@@ -9,6 +9,7 @@
 - **メニューバー常駐**：`🔋 Mobile` / `💤 Normal` で現在のモードを一目で確認
 - **ワンクリック切替**：`Mobile Mode に切替` / `Normal Mode に切替` をメニューから選ぶだけ
 - **Chrome の一時停止/再開**：暴走タブの放熱・電力対策に SIGSTOP/SIGCONT で凍結（v1.2.0〜）
+- **蓋連動オートメーション**：Mobile Mode で蓋を閉じた瞬間に Chrome を自動停止、開けたら自動再開（v1.3.0〜）
 - **sudo パスワードなし**：`/etc/sudoers.d/pmset` 経由で `pmset` のみパスワード省略
 - **Dock を汚さない**：`LSUIElement=true` で Dock アイコン非表示
 
@@ -56,13 +57,14 @@ cd mac-power-mode
 メニューバーのアイコンをクリックすると以下のメニューが表示されます:
 
 ```
-現在: Mobile Mode    （情報表示）
+現在: Mobile | 蓋: 閉    （情報表示）
 ─────────────────
 Mobile Mode に切替  ⌘M
 Normal Mode に切替  ⌘N
 ─────────────────
 Chrome を一時停止           ← Chrome 起動中のみ表示
 Chrome を再開               ← Chrome 一時停止中のみ表示
+☑ 蓋連動: Mobile Mode + 蓋閉で Chrome 自動停止
 ─────────────────
 終了                 ⌘Q
 ```
@@ -80,6 +82,23 @@ Mobile Mode で蓋を閉じている時に Chrome のタブが暴走すると CP
 - 凍結中は通知・タブ更新・ダウンロード・タイマーがすべて停止
 - TCP keepalive を超えるとネットワーク接続が切れることがある
 - 再開時に Slack/Gmail 等の Web アプリで再ログインが必要になる場合がある
+
+### 蓋連動オートメーション（v1.3.0〜）
+
+メニューの `蓋連動: Mobile Mode + 蓋閉で Chrome 自動停止` をクリックして ON にすると、
+以下のタイミングで Chrome が自動操作されます:
+
+| 状況 | アクション |
+|---|---|
+| Mobile Mode 中に蓋を閉じた瞬間 | Chrome を SIGSTOP で凍結 |
+| 蓋を開けた瞬間 | Chrome を SIGCONT で再開 |
+| Mobile → Normal に切替 | Chrome を SIGCONT で再開 |
+| Normal Mode（モード問わず蓋閉じれば clamshell sleep） | アプリ介入なし（OSが寝る） |
+
+蓋の開閉は IOKit の `AppleClamshellState` プロパティ変化を `IOServiceAddInterestNotification`
+で購読しているため、ポーリングなしのリアルタイム検出です。
+
+設定はアプリ間で永続化されます（`UserDefaults` に保存）。デフォルトは OFF。
 
 ## アンインストール
 
