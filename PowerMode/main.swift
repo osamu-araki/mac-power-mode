@@ -1,5 +1,5 @@
 // Power Mode — メニューバー常駐の電源モード切替アプリ
-// Version: 1.5.1 | Updated: 2026-05-10
+// Version: 1.5.2 | Updated: 2026-05-10
 // [2026-05-09] Chrome の SIGSTOP/SIGCONT 制御
 // [2026-05-09] 自動終了（AutomaticTermination）を無効化
 // [2026-05-10] runOutput のパイプバッファ・デッドロックを修正
@@ -128,8 +128,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func acquireUserActiveAssertion() {
         guard userActiveAssertionID == 0 else { return }  // 既に保持中
         var id: IOPMAssertionID = 0
+        // "UserIsActive" は caffeinate(1) も使う assertion type 文字列。
+        // SDK の IOPMLib.h に公開定数 (kIOPMAssertionTypeUserIsActive) は無いため文字列で指定する。
         let result = IOPMAssertionCreateWithName(
-            "UserIsActive" as CFString,  // = kIOPMAssertionTypeUserIsActive
+            "UserIsActive" as CFString,
             IOPMAssertionLevel(kIOPMAssertionLevelOn),
             "Power Mode: keep UserIsActive while in Mobile Mode" as CFString,
             &id
@@ -143,7 +145,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func releaseUserActiveAssertion() {
         guard userActiveAssertionID != 0 else { return }
-        IOPMAssertionRelease(userActiveAssertionID)
+        let result = IOPMAssertionRelease(userActiveAssertionID)
+        if result != kIOReturnSuccess {
+            NSLog("releaseUserActiveAssertion: IOPMAssertionRelease failed: \(result)")
+        }
         userActiveAssertionID = 0
     }
 
@@ -343,6 +348,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         // 念のため蓋状態も再読込（通知を取りこぼした場合の保険）
         lastKnownLidClosed = readClamshellState()
+        // 外部（ターミナル等）から pmset / scripts でモード変更された場合に
+        // アサーションがズレることを防ぐため、メニューを開くたびに同期する
+        applyUserActiveAssertion()
         updateStatus()
     }
 }

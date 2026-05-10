@@ -9,7 +9,7 @@
 - **メニューバー常駐**：`🔋 Mobile` / `💤 Normal` で現在のモードを一目で確認
 - **ワンクリック切替**：`Mobile Mode に切替` / `Normal Mode に切替` をメニューから選ぶだけ
 - **Chrome 自動停止/再開**：Mobile Mode で蓋を閉じると Chrome を SIGSTOP で凍結、開けたら SIGCONT で再開
-- **背景タスク抑制**：Mobile Mode 中は IOKit の `kIOPMAssertionTypeUserIsActive` を保持し、Spotlight/Time Machine/iCloud などの自動起動を防ぐ（v1.5.0〜）
+- **背景タスク抑制**：Mobile Mode 中は IOKit の `UserIsActive` アサーションを保持し、Spotlight/Time Machine/iCloud などの自動起動を防ぐ（v1.5.0〜）
 - **sudo パスワードなし**：`/etc/sudoers.d/pmset` 経由で `pmset` のみパスワード省略
 - **Dock を汚さない**：`LSUIElement=true` で Dock アイコン非表示
 
@@ -151,7 +151,11 @@ mac-power-mode/
 
 ### caffeinate との関係
 
-このアプリは `pmset` の設定変更のみを行います。Claude Code 起動時の `caffeinate -dimsu claude` 等の運用とは独立して動作します。`caffeinate` のみでは蓋閉じスリープを防げないため、Mobile Mode が必要です。
+このアプリは以下を行います:
+- 同梱シェルスクリプト経由で `pmset` の設定変更（sleep / SleepDisabled）
+- Swift プロセス内で `IOPMAssertion` (`UserIsActive`) を直接保持（`caffeinate` プロセスは起動しない）
+
+Claude Code 起動時の `caffeinate -dimsu claude` 等の運用とは独立して動作します。`caffeinate` のみでは蓋閉じスリープを防げないため、Mobile Mode が必要です。
 
 ## ライセンス
 
