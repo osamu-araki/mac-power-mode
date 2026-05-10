@@ -1,5 +1,5 @@
 // Power Mode — メニューバー常駐の電源モード切替アプリ
-// Version: 1.4.0 | Updated: 2026-05-10
+// Version: 1.5.0 | Updated: 2026-05-10
 // [2026-05-09] Chrome の SIGSTOP/SIGCONT 制御
 // [2026-05-09] 自動終了（AutomaticTermination）を無効化
 // [2026-05-10] runOutput のパイプバッファ・デッドロックを修正
