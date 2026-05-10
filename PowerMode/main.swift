@@ -1,10 +1,12 @@
 // Power Mode — メニューバー常駐の電源モード切替アプリ
-// Version: 1.5.0 | Updated: 2026-05-10
+// Version: 1.5.1 | Updated: 2026-05-10
 // [2026-05-09] Chrome の SIGSTOP/SIGCONT 制御
 // [2026-05-09] 自動終了（AutomaticTermination）を無効化
 // [2026-05-10] runOutput のパイプバッファ・デッドロックを修正
 // [2026-05-10] 蓋連動オートメーション追加
 // [2026-05-10] UI を簡素化: Chrome の手動操作・opt-in トグルを撤去し、常時自動連動に統一
+// [2026-05-10] Mobile Mode 中の UserIsActive アサーションを caffeinate ではなく
+//              Swift 側で IOPMAssertion 直接保持に変更（PIDファイル方式の脆弱性を排除）
 
 import Cocoa
 import IOKit
@@ -17,6 +19,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var notifyPort: IONotificationPortRef?
     var lidNotifierObject: io_object_t = 0
     var lastKnownLidClosed: Bool = false
+
+    // UserIsActive アサーション（Mobile Mode 中のみ保持）
+    // 0 = アサーションなし、それ以外 = 有効なアサーションID
+    var userActiveAssertionID: IOPMAssertionID = 0
 
     /// スクリプトの探索順:
     /// 1. 環境変数 POWER_MODE_SCRIPTS_DIR
@@ -72,6 +78,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastKnownLidClosed = readClamshellState()
         setupClamshellNotifications()
 
+        // 起動時の現在モードに応じて UserIsActive アサーションを整合させる
+        // （前回 Mobile Mode のまま終了 → 再起動した場合のため）
+        applyUserActiveAssertion()
+
         updateStatus()
     }
 
@@ -79,20 +89,62 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func switchToMobile() {
         runScript("\(scriptsBase)/mobile-mode.sh")
-        applyAutoPauseLogic()  // モード切替時に Chrome 状態を整合
+        applyUserActiveAssertion()  // Mobile に入ったら UserIsActive を維持
+        applyAutoPauseLogic()       // モード切替時に Chrome 状態を整合
         updateStatus()
     }
 
     @objc func switchToNormal() {
         runScript("\(scriptsBase)/normal-mode.sh")
-        applyAutoPauseLogic()  // Normal に戻ったら Chrome を再開
+        applyUserActiveAssertion()  // Normal に戻ったら UserIsActive を解除
+        applyAutoPauseLogic()       // Chrome を再開
         updateStatus()
     }
 
     @objc func quitApp() {
-        // 終了時に Chrome が停止状態だったら再開してから終了（取り残し防止）
+        // 終了時のクリーンアップ:
+        // - 我々が保持していた UserIsActive アサーションを解放
+        // - 我々がSIGSTOPしたかもしれないChromeを SIGCONT して取り残しを防ぐ
+        releaseUserActiveAssertion()
         runProcess("/usr/bin/pkill", ["-CONT", "-f", "Google Chrome"])
         NSApp.terminate(nil)
+    }
+
+    // MARK: - UserIsActive アサーション管理
+    // shell の caffeinate(1) を起動する代わりに IOPMAssertion を直接保持する。
+    // PIDファイル不要 → /tmp の symlink 攻撃、PID再利用、誤kill、排他制御の問題が
+    // 構造的に発生しない。アサーションIDはプロセスIDとは別物。
+
+    /// 現在のモードに合わせてアサーションを取得/解放する（冪等）
+    func applyUserActiveAssertion() {
+        let mode = currentMode().mode
+        if mode == "Mobile" {
+            acquireUserActiveAssertion()
+        } else {
+            releaseUserActiveAssertion()
+        }
+    }
+
+    func acquireUserActiveAssertion() {
+        guard userActiveAssertionID == 0 else { return }  // 既に保持中
+        var id: IOPMAssertionID = 0
+        let result = IOPMAssertionCreateWithName(
+            "UserIsActive" as CFString,  // = kIOPMAssertionTypeUserIsActive
+            IOPMAssertionLevel(kIOPMAssertionLevelOn),
+            "Power Mode: keep UserIsActive while in Mobile Mode" as CFString,
+            &id
+        )
+        if result == kIOReturnSuccess {
+            userActiveAssertionID = id
+        } else {
+            NSLog("acquireUserActiveAssertion: IOPMAssertionCreateWithName failed: \(result)")
+        }
+    }
+
+    func releaseUserActiveAssertion() {
+        guard userActiveAssertionID != 0 else { return }
+        IOPMAssertionRelease(userActiveAssertionID)
+        userActiveAssertionID = 0
     }
 
     // MARK: - 蓋イベント検出
