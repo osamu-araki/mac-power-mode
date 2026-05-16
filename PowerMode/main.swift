@@ -1,5 +1,5 @@
 // Power Mode — メニューバー常駐の電源モード切替アプリ
-// Version: 1.5.2 | Updated: 2026-05-10
+// Version: 1.6.0 | Updated: 2026-05-10
 // [2026-05-09] Chrome の SIGSTOP/SIGCONT 制御
 // [2026-05-09] 自動終了（AutomaticTermination）を無効化
 // [2026-05-10] runOutput のパイプバッファ・デッドロックを修正
@@ -7,6 +7,7 @@
 // [2026-05-10] UI を簡素化: Chrome の手動操作・opt-in トグルを撤去し、常時自動連動に統一
 // [2026-05-10] Mobile Mode 中の UserIsActive アサーションを caffeinate ではなく
 //              Swift 側で IOPMAssertion 直接保持に変更（PIDファイル方式の脆弱性を排除）
+// [2026-05-10] NetworkClientActive アサーションを追加（蓋閉じ時のWi-Fi切断対策）
 
 import Cocoa
 import IOKit
@@ -20,9 +21,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var lidNotifierObject: io_object_t = 0
     var lastKnownLidClosed: Bool = false
 
-    // UserIsActive アサーション（Mobile Mode 中のみ保持）
+    // IOPMAssertion（Mobile Mode 中のみ保持）
     // 0 = アサーションなし、それ以外 = 有効なアサーションID
-    var userActiveAssertionID: IOPMAssertionID = 0
+    var userActiveAssertionID: IOPMAssertionID = 0   // UserIsActive: 背景タスク抑制
+    var networkAssertionID: IOPMAssertionID = 0      // NetworkClientActive: 蓋閉じ時のWi-Fi切断対策
 
     /// スクリプトの探索順:
     /// 1. 環境変数 POWER_MODE_SCRIPTS_DIR
@@ -78,9 +80,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastKnownLidClosed = readClamshellState()
         setupClamshellNotifications()
 
-        // 起動時の現在モードに応じて UserIsActive アサーションを整合させる
+        // 起動時の現在モードに応じてアサーションを整合させる
         // （前回 Mobile Mode のまま終了 → 再起動した場合のため）
-        applyUserActiveAssertion()
+        applyMobileModeAssertions()
 
         updateStatus()
     }
@@ -89,67 +91,89 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func switchToMobile() {
         runScript("\(scriptsBase)/mobile-mode.sh")
-        applyUserActiveAssertion()  // Mobile に入ったら UserIsActive を維持
-        applyAutoPauseLogic()       // モード切替時に Chrome 状態を整合
+        applyMobileModeAssertions()  // Mobile に入ったらアサーションを取得
+        applyAutoPauseLogic()        // モード切替時に Chrome 状態を整合
         updateStatus()
     }
 
     @objc func switchToNormal() {
         runScript("\(scriptsBase)/normal-mode.sh")
-        applyUserActiveAssertion()  // Normal に戻ったら UserIsActive を解除
-        applyAutoPauseLogic()       // Chrome を再開
+        applyMobileModeAssertions()  // Normal に戻ったらアサーションを解放
+        applyAutoPauseLogic()        // Chrome を再開
         updateStatus()
     }
 
     @objc func quitApp() {
         // 終了時のクリーンアップ:
-        // - 我々が保持していた UserIsActive アサーションを解放
+        // - 我々が保持していた IOPMAssertion をすべて解放
         // - 我々がSIGSTOPしたかもしれないChromeを SIGCONT して取り残しを防ぐ
-        releaseUserActiveAssertion()
+        releaseAllAssertions()
         runProcess("/usr/bin/pkill", ["-CONT", "-f", "Google Chrome"])
         NSApp.terminate(nil)
     }
 
-    // MARK: - UserIsActive アサーション管理
+    // MARK: - IOPMAssertion 管理
     // shell の caffeinate(1) を起動する代わりに IOPMAssertion を直接保持する。
     // PIDファイル不要 → /tmp の symlink 攻撃、PID再利用、誤kill、排他制御の問題が
     // 構造的に発生しない。アサーションIDはプロセスIDとは別物。
+    //
+    // Mobile Mode 中に保持するアサーション:
+    //  - "UserIsActive":        離席判定を防ぎ Spotlight/Time Machine 等の背景タスク起動を抑制
+    //  - "NetworkClientActive": ネットワーククライアント活動中とみなさせ、蓋閉じ時のWi-Fi切断を抑制
+    //
+    // いずれも IOPMLib.h に公開定数がないため assertion type 文字列を直接指定する。
 
     /// 現在のモードに合わせてアサーションを取得/解放する（冪等）
-    func applyUserActiveAssertion() {
+    func applyMobileModeAssertions() {
         let mode = currentMode().mode
         if mode == "Mobile" {
-            acquireUserActiveAssertion()
+            createAssertion(
+                type: "UserIsActive",
+                reason: "Power Mode: keep UserIsActive while in Mobile Mode",
+                into: &userActiveAssertionID
+            )
+            createAssertion(
+                type: "NetworkClientActive",
+                reason: "Power Mode: keep network available while in Mobile Mode",
+                into: &networkAssertionID
+            )
         } else {
-            releaseUserActiveAssertion()
+            releaseAssertionIfHeld(&userActiveAssertionID)
+            releaseAssertionIfHeld(&networkAssertionID)
         }
     }
 
-    func acquireUserActiveAssertion() {
-        guard userActiveAssertionID == 0 else { return }  // 既に保持中
-        var id: IOPMAssertionID = 0
-        // "UserIsActive" は caffeinate(1) も使う assertion type 文字列。
-        // SDK の IOPMLib.h に公開定数 (kIOPMAssertionTypeUserIsActive) は無いため文字列で指定する。
+    /// 指定タイプの IOPMAssertion を取得する。既に保持中なら何もしない（冪等）。
+    func createAssertion(type: String, reason: String, into id: inout IOPMAssertionID) {
+        guard id == 0 else { return }
+        var newID: IOPMAssertionID = 0
         let result = IOPMAssertionCreateWithName(
-            "UserIsActive" as CFString,
+            type as CFString,
             IOPMAssertionLevel(kIOPMAssertionLevelOn),
-            "Power Mode: keep UserIsActive while in Mobile Mode" as CFString,
-            &id
+            reason as CFString,
+            &newID
         )
         if result == kIOReturnSuccess {
-            userActiveAssertionID = id
+            id = newID
         } else {
-            NSLog("acquireUserActiveAssertion: IOPMAssertionCreateWithName failed: \(result)")
+            NSLog("createAssertion(\(type)) failed: \(result)")
         }
     }
 
-    func releaseUserActiveAssertion() {
-        guard userActiveAssertionID != 0 else { return }
-        let result = IOPMAssertionRelease(userActiveAssertionID)
+    /// 保持中の IOPMAssertion を解放する。保持していなければ何もしない（冪等）。
+    func releaseAssertionIfHeld(_ id: inout IOPMAssertionID) {
+        guard id != 0 else { return }
+        let result = IOPMAssertionRelease(id)
         if result != kIOReturnSuccess {
-            NSLog("releaseUserActiveAssertion: IOPMAssertionRelease failed: \(result)")
+            NSLog("releaseAssertionIfHeld: IOPMAssertionRelease failed: \(result)")
         }
-        userActiveAssertionID = 0
+        id = 0
+    }
+
+    /// 保持中のすべての IOPMAssertion を解放する（アプリ終了時用）
+    func releaseAllAssertions() {
+        releaseAssertionIfHeld(&userActiveAssertionID)
+        releaseAssertionIfHeld(&networkAssertionID)
     }
 
     // MARK: - 蓋イベント検出
@@ -350,7 +374,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastKnownLidClosed = readClamshellState()
         // 外部（ターミナル等）から pmset / scripts でモード変更された場合に
         // アサーションがズレることを防ぐため、メニューを開くたびに同期する
-        applyUserActiveAssertion()
+        applyMobileModeAssertions()
         updateStatus()
     }
 }

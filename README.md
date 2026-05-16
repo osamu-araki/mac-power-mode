@@ -10,6 +10,7 @@
 - **ワンクリック切替**：`Mobile Mode に切替` / `Normal Mode に切替` をメニューから選ぶだけ
 - **Chrome 自動停止/再開**：Mobile Mode で蓋を閉じると Chrome を SIGSTOP で凍結、開けたら SIGCONT で再開
 - **背景タスク抑制**：Mobile Mode 中は IOKit の `UserIsActive` アサーションを保持し、Spotlight/Time Machine/iCloud などの自動起動を防ぐ（v1.5.0〜）
+- **Wi-Fi 切断対策**：Mobile Mode 中は `NetworkClientActive` アサーションを保持し、蓋を閉じた際のネットワーク切断を抑制（v1.6.0〜）
 - **sudo パスワードなし**：`/etc/sudoers.d/pmset` 経由で `pmset` のみパスワード省略
 - **Dock を汚さない**：`LSUIElement=true` で Dock アイコン非表示
 
@@ -153,9 +154,13 @@ mac-power-mode/
 
 このアプリは以下を行います:
 - 同梱シェルスクリプト経由で `pmset` の設定変更（sleep / SleepDisabled）
-- Swift プロセス内で `IOPMAssertion` (`UserIsActive`) を直接保持（`caffeinate` プロセスは起動しない）
+- Swift プロセス内で `IOPMAssertion` を直接保持（`caffeinate` プロセスは起動しない）
+  - `UserIsActive`: 背景タスクの自動起動を抑制
+  - `NetworkClientActive`: 蓋閉じ時のネットワーク切断を抑制
 
 Claude Code 起動時の `caffeinate -dimsu claude` 等の運用とは独立して動作します。`caffeinate` のみでは蓋閉じスリープを防げないため、Mobile Mode が必要です。
+
+> **補足**: `NetworkClientActive` アサーションは「ネットワーククライアントとして活動中」と macOS に伝えるものです。蓋を閉じて外部ディスプレイがない状態での Wi-Fi 維持は macOS の想定外動作のため、環境によっては完全に切断を防げない場合があります。
 
 ## ライセンス
 
